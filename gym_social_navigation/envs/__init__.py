@@ -1,0 +1,1 @@
+from gym_social_navigation.envs.social_navigation_env import SocialNavigationEnv
