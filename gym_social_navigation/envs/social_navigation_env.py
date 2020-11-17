@@ -14,8 +14,17 @@ class SocialNavigationEnv(gym.Env):
         self.steering_angle = 30 * np.pi/180 # We assume a Dubins Car with fixed steering angle
         self.prox_rad = 10 # In what radius around our robot do we keep track of human agents?
         self.num_agents = 10 # How many agents can we keep track of / include in our state?
-        self.num_path_points = 2 # How many points to include in our discretized path
+        self.num_path_points = 10 # How many points to include in our discretized path
         self.min_path_len = 0.25 # Normalized min dist for the path [0,1]
+        self.episode_time = 30 # How long should the episodes last before being terminated?
+        
+        # Reward function parameters
+        self.alpha = 0.5
+        self.beta = 0.5
+        self.goal_reward = 10
+        self.collision_penalty = 12
+        self.goal_thresh = 0.1
+        self.collision_dist = 0.75
 
         # Starting pose of the robot is pointing towards the goal
         self.set_random_path()
@@ -26,6 +35,7 @@ class SocialNavigationEnv(gym.Env):
         datafile = os.path.dirname(os.path.abspath(__file__)) + '/data/eth/train/crowds_zara01_train.txt'
         data = np.loadtxt(datafile)
         self.timestep = 0.4 # Don't change! Discretization of the dataset
+        self.episode_time = int(self.episode_time/self.timestep)
         self.mint,self.maxt = data[:,0].min(),data[:,0].max()
         self.minx,self.maxx = data[:,2].min(),data[:,2].max()
         self.miny,self.maxy = data[:,3].min(),data[:,3].max()
@@ -39,18 +49,18 @@ class SocialNavigationEnv(gym.Env):
             id = int(x[1]-1)
             t = int((x[0]-self.mint)/10)
             self.agents[id][t] = np.array([(x[2]-self.minx)/(self.maxx-self.minx),(x[3]-self.miny)/(self.maxy-self.miny)])
-        self.maxt = (self.maxt - self.mint)/10
+        self.maxt = int((self.maxt - self.mint)/10)
         self.mint = 0
 
         # Setup observation and action spaces
-        n = int( 3 + 2*self.num_agents*(self.agent_hist+1)  + 2*self.num_path_points )
+        n = int(3 + 2*self.num_agents*(self.agent_hist+1) + 2*self.num_path_points)
         self.low = np.zeros(n)
         self.high = np.ones(n)
         self.observation_space = spaces.Box(np.float32(self.low),np.float32(self.high))
         self.actions = [('L',v) for v in np.arange(dv,max_vel+dv,dv)] + [('S',v) for v in np.arange(0,max_vel+dv,dv)] + [('R',v) for v in np.arange(dv,max_vel+dv,dv)]
         self.action_space = spaces.Discrete(len(self.actions))
         self.time = 0
-
+        self.start_time = 0
 
     def set_random_path(self):
         '''
@@ -108,9 +118,13 @@ class SocialNavigationEnv(gym.Env):
         self.set_random_path()
         self.pose = [self.start[0]*(self.maxx-self.minx)+self.minx,self.start[1]*(self.maxy-self.miny)+self.miny,np.arctan2((self.goal-self.start)[1],(self.goal-self.start)[0])%(2*np.pi)]
         self.pose_history = np.array([self.pose])
-        self.time = 0
+        if self.maxt - self.episode_time > 0:
+            self.time = np.random.randint(low=0,high=self.maxt-self.episode_time)
+        else:
+            self.time = 0
+        self.start_time = self.time
         robot_pos = np.array([(self.pose[0]-self.minx)/(self.maxx-self.minx),(self.pose[1]-self.miny)/(self.maxy-self.miny),self.pose[2]/(2*np.pi)])
-        return np.concatenate((robot_pos,self.get_agent_states(0),self.path))
+        return np.concatenate((robot_pos,self.get_agent_states(self.time),self.path))
 
     def step(self,action):
         ''' 
@@ -142,12 +156,31 @@ class SocialNavigationEnv(gym.Env):
         state = np.concatenate((robot_pos,self.get_agent_states(self.time),self.path))
 
         # Calculate reward
-        reward = 0
+        a = self.start[1]-self.goal[1]
+        b = self.goal[0]-self.start[0]
+        c = self.goal[1]*(self.start[0]-self.goal[0]) + self.goal[0]*(self.goal[1]-self.start[1])
+        path_dist = abs(a*robot_pos[0]+b*robot_pos[1]+c)/np.sqrt(a*a+b*b)
+        goal_dist = np.linalg.norm(self.goal-robot_pos[0:2])
 
-        # Is this a terminal state?
+        reward = -self.alpha*path_dist - self.beta*goal_dist
         done = False
-        #if self.time >= self.maxt: done = True
-        #if np.sqrt((self.pose[0]-self.goal[0])**2+(self.pose[1]-self.goal[1])**2) < 1e-1: done = True
+
+        for id in self.agents:
+            if self.time in self.agents[id]:
+                if np.linalg.norm(self.agents[id][self.time]-self.pose[0:2]) < self.collision_dist:
+                    reward -= self.collision_penalty
+                    done = True
+                    break
+
+        if goal_dist < self.goal_thresh:
+            reward += self.goal_reward
+            done = True
+
+        # Are we out of time?
+        if self.time >= self.start_time + self.episode_time: done = True
+
+        # Are we out of bounds?
+        if robot_pos[0] < 0 or robot_pos[0] > 1 or robot_pos[1] < 0 or robot_pos[1] > 1: done = True
 
         return state,reward,done,{}
 
