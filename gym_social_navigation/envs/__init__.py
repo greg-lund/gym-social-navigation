@@ -1,1 +1,1 @@
-from gym_social_navigation.envs.social_navigation_env import SocialNavigationEnv
+from gym_social_navigation.envs.social_nav_env import SocialNavEnv

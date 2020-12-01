@@ -3,54 +3,53 @@ import matplotlib.pyplot as plt
 import numpy as np
 from gym import spaces
 
-class SocialNavigationEnv(gym.Env):
+class SocialNavEnv(gym.Env):
 
-    def __init__(self):
+    def __init__(self,test=False):
 
         # Parameters worth changing
         self.agent_hist = 4 # How many previous states for each agent do we keep track of?
         max_vel = 0.75 # Maximum velocity of the robot in m/s
-        dv = 0.125 # Discretization for velocity in actions
+        dv = 0.25 # Discretization for velocity in actions
         self.steering_angle = 30 * np.pi/180 # We assume a Dubins Car with fixed steering angle
         self.prox_rad = 10 # In what radius around our robot do we keep track of human agents?
         self.num_agents = 10 # How many agents can we keep track of / include in our state?
         self.num_path_points = 10 # How many points to include in our discretized path
         self.min_path_len = 0.25 # Normalized min dist for the path [0,1]
-        self.episode_time = 30 # How long should the episodes last before being terminated?
+        self.episode_time = 60 # How long should the episodes last before being terminated?
         
         # Reward function parameters
-        self.alpha = 0.5
-        self.beta = 0.5
+        self.alpha = 5 # Delta path parameter
+        self.beta = 5  # Delta goal parameter
         self.goal_reward = 10
-        self.collision_penalty = 12
-        self.goal_thresh = 0.1
-        self.collision_dist = 0.75
-
-        # Starting pose of the robot is pointing towards the goal
-        self.set_random_path()
-        self.pose = np.array([self.start[0],self.start[1],np.arctan2((self.goal-self.start)[1],(self.goal-self.start)[0])%(2*np.pi)])
-        self.pose_history = np.array([self.pose])
+        self.collision_penalty = 10
+        self.out_of_bounds_penalty = 10
+        self.goal_thresh = 0.05
+        self.collision_dist = 0.35
 
         # Human Pedestrian Data
-        datafile = os.path.dirname(os.path.abspath(__file__)) + '/data/eth/train/crowds_zara01_train.txt'
-        data = np.loadtxt(datafile)
+        if test:
+            files = ['data/val/biwi_eth_val.txt','data/val/crowds_zara01_val.txt',
+                    'data/val/crowds_zara02_val.txt','data/val/crowds_zara03_val.txt','data/val/students001_val.txt',
+                    'data/val/students003_val.txt','data/val/uni_examples_val.txt']
+        else:
+            files = ['data/train/biwi_eth_train.txt','data/train/crowds_zara01_train.txt',
+                    'data/train/crowds_zara02_train.txt','data/train/crowds_zara03_train.txt','data/train/students001_train.txt',
+                    'data/train/students003_train.txt','data/train/uni_examples_train.txt']
+
+        for i in range(len(files)):
+            files[i] = os.path.dirname(os.path.abspath(__file__)) + '/' + files[i]
+
+        # Get all agent data in self.agent_data
+        self.parse_data(files)
+        total_agents = max([x['num_agents'] for x in self.agent_data])
+
+        # Plotting
+        self.colors = self.get_spaced_colors(total_agents)
+        plt.rcParams['axes.facecolor'] = (0.9,0.9,0.9)
+
         self.timestep = 0.4 # Don't change! Discretization of the dataset
         self.episode_time = int(self.episode_time/self.timestep)
-        self.mint,self.maxt = data[:,0].min(),data[:,0].max()
-        self.minx,self.maxx = data[:,2].min(),data[:,2].max()
-        self.miny,self.maxy = data[:,3].min(),data[:,3].max()
-
-        # Agent data and colors
-        self.total_agents = int(data[:,1].max() - data[:,1].min())
-        self.colors = self.get_spaced_colors(self.total_agents)
-        plt.rcParams['axes.facecolor'] = (0.9,0.9,0.9)
-        self.agents = {id:{} for id in range(self.total_agents+1)}
-        for x in data:
-            id = int(x[1]-1)
-            t = int((x[0]-self.mint)/10)
-            self.agents[id][t] = np.array([(x[2]-self.minx)/(self.maxx-self.minx),(x[3]-self.miny)/(self.maxy-self.miny)])
-        self.maxt = int((self.maxt - self.mint)/10)
-        self.mint = 0
 
         # Setup observation and action spaces
         n = int(3 + 2*self.num_agents*(self.agent_hist+1) + 2*self.num_path_points)
@@ -62,19 +61,82 @@ class SocialNavigationEnv(gym.Env):
         self.time = 0
         self.start_time = 0
 
+        # Reset simulation to populate env data
+        _ = self.reset()
+
+    def parse_data(self,filenames):
+        '''
+        Given filenames, parse the data and return a list of dictionaries of agent movements
+        '''
+
+        # Get common ranges among all datasets
+        xrange,yrange = float('inf'),float('inf')
+        for f in filenames:
+            data = np.loadtxt(f)
+            minx,maxx = data[:,2].min(),data[:,2].max()
+            miny,maxy = data[:,3].min(),data[:,3].max()
+            if maxx-minx < xrange:
+                xrange = maxx-minx
+            if maxy-miny < yrange:
+                yrange = maxy-miny
+
+        self.agent_data = []
+        for filename in filenames:
+            data = np.loadtxt(filename)
+            minid,maxid = int(data[:,1].min()),int(data[:,1].max())
+            num_agents = int(data[:,1].max() - data[:,1].min())
+            mint,maxt = data[:,0].min(),data[:,0].max()
+            minx,maxx = data[:,2].min(),data[:,2].max()
+            miny,maxy = data[:,3].min(),data[:,3].max()
+
+            if maxx-minx > xrange:
+                maxx = maxx - (maxx-minx-xrange)
+            if maxy-miny > yrange:
+                maxy = maxy - (maxy-miny-yrange)
+
+            agents = {id:{} for id in range(num_agents+1)}
+            agents['num_agents'] = num_agents
+            # limits: [mint,maxt,minx,maxx,miny,maxy]
+            agents['limits'] = [0,int((maxt-mint)/10),minx,maxx,miny,maxy]
+
+            for x in data:
+                id = int(x[1]-1) - (minid-1)
+                t = int((x[0]-mint)/10)
+                if x[2] > maxx or x[3] > maxy:
+                    continue
+                agents[id][t] = np.array([(x[2]-minx)/(maxx-minx),(x[3]-miny)/(maxy-miny)])
+
+            self.agent_data.append(agents)
+
     def set_random_path(self):
         '''
         Generate random starting and goal positions, and a path that connects them
         '''
-        p1 = np.random.random(2)
-        p2 = np.random.random(2)
-        while np.linalg.norm(p1-p2) < self.min_path_len:
+        valid_start_time = False
+        while not valid_start_time:
             p1 = np.random.random(2)
             p2 = np.random.random(2)
+            while np.linalg.norm(p1-p2) < self.min_path_len:
+                p1 = np.random.random(2)
+                p2 = np.random.random(2)
 
-        self.start = p1
-        self.goal = p2
+            self.start = p1
+            self.goal = p2
+            self.pose = np.array([self.start[0]*(self.maxx-self.minx)+self.minx,self.start[1]*(self.maxy-self.miny)+self.miny,np.arctan2((self.goal-self.start)[1],(self.goal-self.start)[0])%(2*np.pi)])
+
+            valid_start_time = True
+            ids = [id for id in self.agents.keys() if isinstance(id,int)]
+            for id in ids:
+                if self.start_time in self.agents[id]:
+                    agent_pos = np.array([self.agents[id][self.time][0]*(self.maxx-self.minx) + self.minx,
+                        self.agents[id][self.time][1]*(self.maxy-self.miny) + self.miny])
+                    if np.linalg.norm(agent_pos - self.pose[0:2]) < 2*self.collision_dist:
+                        valid_start_time = False
+                        break
+
         self.path = np.linspace(p1,p2,self.num_path_points).flatten()
+        self.pose = np.array([self.start[0]*(self.maxx-self.minx)+self.minx,self.start[1]*(self.maxy-self.miny)+self.miny,np.arctan2((self.goal-self.start)[1],(self.goal-self.start)[0])%(2*np.pi)])
+        self.pose_history = np.array([self.pose])
 
     def get_agent_states(self,time):
         '''
@@ -84,7 +146,8 @@ class SocialNavigationEnv(gym.Env):
 
         states = None
         n = 0
-        for id in self.agents:
+        ids = [id for id in self.agents.keys() if isinstance(id,int)]
+        for id in ids:
             if time in self.agents[id]:
                 # If this agent is outside of our proximity radius, don't include it
                 p = self.agents[id][time] - self.pose[0:2]
@@ -113,18 +176,36 @@ class SocialNavigationEnv(gym.Env):
         
     def reset(self):
         '''
-        Reset the entire simulation, including new start and goal
+        Reset the entire simulation, including new dataset, start and goal
         '''
-        self.set_random_path()
-        self.pose = [self.start[0]*(self.maxx-self.minx)+self.minx,self.start[1]*(self.maxy-self.miny)+self.miny,np.arctan2((self.goal-self.start)[1],(self.goal-self.start)[0])%(2*np.pi)]
-        self.pose_history = np.array([self.pose])
+
+        # Set new dataset
+        idx = np.random.randint(len(self.agent_data))
+        self.agents = self.agent_data[idx]
+        self.mint,self.maxt = 0,self.agents['limits'][1]-self.agents['limits'][0]
+        self.minx,self.maxx = self.agents['limits'][2],self.agents['limits'][3]
+        self.miny,self.maxy = self.agents['limits'][4],self.agents['limits'][5]
+
+        # Set new path, start and goal
         if self.maxt - self.episode_time > 0:
             self.time = np.random.randint(low=0,high=self.maxt-self.episode_time)
         else:
             self.time = 0
         self.start_time = self.time
+
+        self.set_random_path()
+
         robot_pos = np.array([(self.pose[0]-self.minx)/(self.maxx-self.minx),(self.pose[1]-self.miny)/(self.maxy-self.miny),self.pose[2]/(2*np.pi)])
         return np.concatenate((robot_pos,self.get_agent_states(self.time),self.path))
+
+    def distance_to_path(self,pose):
+        '''
+        Given some robot pose, return the distance to our linear path
+        '''
+        a = self.start[1]-self.goal[1]
+        b = self.goal[0]-self.start[0]
+        c = self.goal[1]*(self.start[0]-self.goal[0]) + self.goal[0]*(self.goal[1]-self.start[1])
+        return abs(a*pose[0]+b*pose[1]+c)/np.sqrt(a*a+b*b)
 
     def step(self,action):
         ''' 
@@ -132,6 +213,8 @@ class SocialNavigationEnv(gym.Env):
         return our new observed state, reward given and whether we've terminated
         '''
         a = self.actions[action]
+
+        prev_pose = np.copy(self.pose)
 
         # Update robot pose based on action
         if a[0] == 'L': # Positive theta dot
@@ -153,34 +236,52 @@ class SocialNavigationEnv(gym.Env):
         # Update observation
         self.time += 1
         robot_pos = np.array([(self.pose[0]-self.minx)/(self.maxx-self.minx),(self.pose[1]-self.miny)/(self.maxy-self.miny),self.pose[2]/(2*np.pi)])
+        prev_robot_pos = np.array([(prev_pose[0]-self.minx)/(self.maxx-self.minx),(prev_pose[1]-self.miny)/(self.maxy-self.miny),prev_pose[2]/(2*np.pi)])
         state = np.concatenate((robot_pos,self.get_agent_states(self.time),self.path))
 
-        # Calculate reward
-        a = self.start[1]-self.goal[1]
-        b = self.goal[0]-self.start[0]
-        c = self.goal[1]*(self.start[0]-self.goal[0]) + self.goal[0]*(self.goal[1]-self.start[1])
-        path_dist = abs(a*robot_pos[0]+b*robot_pos[1]+c)/np.sqrt(a*a+b*b)
-        goal_dist = np.linalg.norm(self.goal-robot_pos[0:2])
+        # Calculate change in distance to goal
+        d0 = np.linalg.norm(prev_robot_pos[0:2] - self.goal)
+        d1 = np.linalg.norm(robot_pos[0:2] - self.goal)
+        delta_goal = -d1+d0
 
-        reward = -self.alpha*path_dist - self.beta*goal_dist
+        # Calculate change in distance from path
+        p0 = self.distance_to_path(prev_robot_pos)
+        p1 = self.distance_to_path(robot_pos)
+        delta_path = -p1+p0
+        print("Delta path:%.3f"%delta_path)
+        print("Delta goal:%.3f"%delta_goal)
+
+        # Calculate reward
+        reward = self.alpha*delta_path + self.beta*delta_goal
         done = False
 
-        for id in self.agents:
+        # Did we collide with a human agent?
+        ids = [id for id in self.agents.keys() if isinstance(id,int)]
+        for id in ids:
             if self.time in self.agents[id]:
-                if np.linalg.norm(self.agents[id][self.time]-self.pose[0:2]) < self.collision_dist:
-                    reward -= self.collision_penalty
+                agent_pos = np.array([self.agents[id][self.time][0]*(self.maxx-self.minx) + self.minx,
+                    self.agents[id][self.time][1]*(self.maxy-self.miny) + self.miny])
+                if np.linalg.norm(agent_pos-self.pose[:2]) < self.collision_dist:
+                    reward = -self.collision_penalty
                     done = True
-                    break
+                    return state,reward,done,{}
 
-        if goal_dist < self.goal_thresh:
-            reward += self.goal_reward
+        # Did we reach the goal?
+        if np.linalg.norm(robot_pos[0:2]-self.goal) < self.goal_thresh:
             done = True
+            reward = self.goal_reward
+            return state,reward,done,{}
 
         # Are we out of time?
-        if self.time >= self.start_time + self.episode_time: done = True
+        if self.time >= self.start_time + self.episode_time: 
+            done = True
+            return state,reward,done,{}
 
         # Are we out of bounds?
-        if robot_pos[0] < 0 or robot_pos[0] > 1 or robot_pos[1] < 0 or robot_pos[1] > 1: done = True
+        if robot_pos[0] < 0 or robot_pos[0] > 1 or robot_pos[1] < 0 or robot_pos[1] > 1: 
+            done = True
+            reward = -self.out_of_bounds_penalty
+            return state,reward,done,{}
 
         return state,reward,done,{}
 
@@ -189,10 +290,11 @@ class SocialNavigationEnv(gym.Env):
         Render the current timestep using pyplot
         '''
         plt.clf()
-        for id in self.agents:
+        plt.axis([0,1,0,1])
+        ids = [id for id in self.agents.keys() if isinstance(id,int)]
+        for id in ids:
             # Is this agent in the scene during this timestep?
             if self.time in self.agents[id]:
-                plt.axis([0,1,0,1])
                 plt.scatter(self.agents[id][self.time][0],self.agents[id][self.time][1],color=tuple(self.colors[id]),zorder=1)
                 for i in range(1,self.agent_hist+1):
                     if self.time-i in self.agents[id]:
