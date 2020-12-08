@@ -8,25 +8,25 @@ class SocialNavEnv(gym.Env):
     def __init__(self,test=False):
 
         # Parameters worth changing
-        self.agent_hist = 4 # How many previous states for each agent do we keep track of?
+        self.agent_hist = 3 # How many previous states for each agent do we keep track of?
         max_vel = 0.75 # Maximum velocity of the robot in m/s
         dv = 0.25 # Discretization for velocity in actions
         self.steering_angle = 30 * np.pi/180 # We assume a Dubins Car with fixed steering angle
         self.prox_rad = 10 # In what radius around our robot do we keep track of human agents?
-        self.num_agents = 10 # How many agents can we keep track of / include in our state?
-        self.num_path_points = 10 # How many points to include in our discretized path
-        self.min_path_len = 0.25 # Normalized min dist for the path [0,1]
+        self.num_agents = 4 # How many agents can we keep track of / include in our state?
+        self.num_path_points = 4 # How many points to include in our discretized path
+        self.min_path_len = 0.45 # Normalized min dist for the path [0,1]
         self.episode_time = 60 # How long should the episodes last before being terminated?
-        
+         
         # Reward function parameters
-        self.alpha = 5 # Delta path parameter
+        self.alpha = 3.5 # Delta path parameter
         self.beta = 5  # Delta goal parameter
         self.goal_reward = 10
-        self.collision_penalty = 10
-        self.out_of_bounds_penalty = 10
+        self.collision_penalty = 20
+        self.out_of_bounds_penalty = 15
         self.goal_thresh = 0.05
-        self.collision_dist = 0.35
-
+        self.collision_dist = 0.30
+        
         # Human Pedestrian Data
         if test:
             files = ['data/val/biwi_eth_val.txt','data/val/crowds_zara01_val.txt',
@@ -135,6 +135,15 @@ class SocialNavEnv(gym.Env):
                         break
 
         self.path = np.linspace(p1,p2,self.num_path_points).flatten()
+        theta = (np.arctan2((self.goal-self.start)[1],(self.goal-self.start)[0]) + np.random.normal(0,np.pi/8) ) % (2*np.pi)
+        self.pose = np.array([self.start[0]*(self.maxx-self.minx)+self.minx,self.start[1]*(self.maxy-self.miny)+self.miny,theta])
+        self.pose_history = np.array([self.pose])
+
+    def set_fixed_path(self,start,goal):
+        self.start = start
+        self.goal = goal
+        self.pose = np.array([self.start[0]*(self.maxx-self.minx)+self.minx,self.start[1]*(self.maxy-self.miny)+self.miny,np.arctan2((self.goal-self.start)[1],(self.goal-self.start)[0])%(2*np.pi)])
+        self.path = np.linspace(start,goal,self.num_path_points).flatten()
         self.pose = np.array([self.start[0]*(self.maxx-self.minx)+self.minx,self.start[1]*(self.maxy-self.miny)+self.miny,np.arctan2((self.goal-self.start)[1],(self.goal-self.start)[0])%(2*np.pi)])
         self.pose_history = np.array([self.pose])
 
@@ -157,11 +166,11 @@ class SocialNavEnv(gym.Env):
                 else:
                     states = np.vstack([states,np.zeros(2*(self.agent_hist+1))])
                 states[n,0:2] = self.agents[id][time]
-                for i in range(1,self.agent_hist):
+                for i in range(1,self.agent_hist+1):
                     if time-i in self.agents[id]:
                         states[n,2*i:2*i+2]=self.agents[id][time-i]
                     else:
-                        states[n,2*i:2*i+(self.agent_hist-i+1)*2] = np.array([self.agents[id][time-i+1] for _ in range(self.agent_hist-i+1)]).flatten()
+                        states[n,2*i:] = np.array([self.agents[id][time-i+1] for _ in range(self.agent_hist-i+1)]).flatten()
                         break
                 n+=1
         if states is None:
@@ -195,7 +204,7 @@ class SocialNavEnv(gym.Env):
 
         self.set_random_path()
 
-        robot_pos = np.array([(self.pose[0]-self.minx)/(self.maxx-self.minx),(self.pose[1]-self.miny)/(self.maxy-self.miny),self.pose[2]/(2*np.pi)])
+        robot_pos = np.array([(self.pose[0]-self.minx)/(self.maxx-self.minx),(self.pose[1]-self.miny)/(self.maxy-self.miny),(self.pose[2]%(2*np.pi))/(2*np.pi)])
         return np.concatenate((robot_pos,self.get_agent_states(self.time),self.path))
 
     def distance_to_path(self,pose):
@@ -229,6 +238,7 @@ class SocialNavEnv(gym.Env):
             self.pose[0] += self.timestep*a[1]*np.cos(self.pose[2])
             self.pose[1] += self.timestep*a[1]*np.sin(self.pose[2])
 
+        self.pose[2] = self.pose[2]%(2*np.pi)
         # Update pose history for rendering
         self.pose_history = np.insert(self.pose_history,0,np.copy(self.pose),0)
         self.pose_history = self.pose_history[0:self.agent_hist]
@@ -248,8 +258,6 @@ class SocialNavEnv(gym.Env):
         p0 = self.distance_to_path(prev_robot_pos)
         p1 = self.distance_to_path(robot_pos)
         delta_path = -p1+p0
-        print("Delta path:%.3f"%delta_path)
-        print("Delta goal:%.3f"%delta_goal)
 
         # Calculate reward
         reward = self.alpha*delta_path + self.beta*delta_goal
